@@ -1,10 +1,9 @@
 /********************************************************************************
  * *
- * PROYECTO LABORATORIO I - ESTACIÓN DE MONIToreo AMBIENTAL              *
- * Código Firmware v1.3 (con cálculo de Lux mejorado)                    *
+ * PROYECTO LABORATORIO I - ESTACIÓN DE MONITOREO AMBIENTAL              *
+ * Código Firmware v1.5 (con Calibración de Lux de 2 Puntos)             *
  * *
- * Integra: RTC, DHT22, LDR, BMP280 y LCD.                                  *
- * Incluye lógica de control de LED con histéresis y cálculo de Lux preciso.*
+ * Integra: RTC, DHT22, LDR, BMP280, LCD y Módulo SD.                       *
  * *
  ********************************************************************************/
 
@@ -15,8 +14,13 @@
 #include <RTClib.h>
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BMP280.h>
+#include <SPI.h>
+#include <SD.h>
 
 // --- CONFIGURACIÓN DE HARDWARE Y PINES ---
+// Módulo SD Card
+#define SD_CS_PIN 10
+
 // Sensor de Temperatura y Humedad
 #define DHT_PIN 9
 #define DHT_TYPE DHT22
@@ -38,11 +42,9 @@ LiquidCrystal_I2C lcd(LCD_ADDR, LCD_COLS, LCD_ROWS);
 // Sensor de Luz (LDR) y LED de control
 #define LDR_PIN A0
 #define LED_PIN 4
-// --- Lógica de histéresis aportada por el equipo ---
 const int UMBRAL_ADC_ENCENDER = 300; 
 const int UMBRAL_ADC_APAGAR   = 350;
 bool ledOn = false;
-// ---
 
 // --- VARIABLES GLOBALES PARA DATOS DE SENSORES ---
 float temperatura = NAN;
@@ -51,7 +53,7 @@ float presion = NAN;
 float lux = 0.0;
 float lux_filtrado = 0.0;
 
-// --- GESTIÓN DE TIEMPOS (CICLO NO BLOQUEANTE) ---
+// --- GESTIÓN DE TIEMPOS ---
 unsigned long previousMillis_sensores = 0;
 unsigned long previousMillis_pantalla = 0;
 const long INTERVALO_LECTURA_SENSORES = 5000;
@@ -66,29 +68,40 @@ void leerSensores();
 void actualizarPantalla();
 float filtradoExponencial(float valor_actual, float nueva_lectura, float alfa);
 void inicializarSensores();
-float calcularLuxPreciso(int valorADC); // <-- AÑADIDO: Prototipo de la nueva función
+float calcularLuxCalibrado(int valorADC); // <-- MODIFICADO
+void registrarDatosEnSD();
 
 // =============================================================================
 // --- FUNCIÓN DE SETUP ---
 // =============================================================================
 void setup() {
   Serial.begin(9600);
-  Serial.println("Iniciando Estacion de Monitoreo v1.3...");
+  Serial.println("Iniciando Estacion de Monitoreo v1.5...");
 
-  // Inicialización de periféricos
   pinMode(LED_PIN, OUTPUT);
-  digitalWrite(LED_PIN, LOW); // Aseguramos que el LED inicie apagado
+  digitalWrite(LED_PIN, LOW);
   
   lcd.init();
   lcd.backlight();
   lcd.print("Inicializando...");
-  delay(1000);
+  delay(500);
+
+  // Inicialización del Módulo SD
+  Serial.print("Iniciando SD...");
+  lcd.setCursor(0,1);
+  lcd.print("Iniciando SD...");
+  if (!SD.begin(SD_CS_PIN)) {
+    Serial.println("Error!");
+    lcd.clear();
+    lcd.print("Error Tarjeta SD");
+    while (1);
+  }
+  Serial.println("OK");
+  lcd.clear();
 
   inicializarSensores();
-
   leerSensores(); 
   Serial.println("Sistema listo.");
-  lcd.clear();
 }
 
 // =============================================================================
@@ -100,6 +113,7 @@ void loop() {
   if (currentMillis - previousMillis_sensores >= INTERVALO_LECTURA_SENSORES) {
     previousMillis_sensores = currentMillis;
     leerSensores();
+    registrarDatosEnSD();
   }
 
   if (currentMillis - previousMillis_pantalla >= INTERVALO_ACTUALIZACION_LCD) {
@@ -134,13 +148,10 @@ void leerSensores() {
 
   // 3. Lectura LDR
   int ldr_raw = analogRead(LDR_PIN);
-  
-  // --- MODIFICADO: Se reemplaza map() por la función de cálculo preciso ---
-  lux = calcularLuxPreciso(ldr_raw);
-
+  lux = calcularLuxCalibrado(ldr_raw); // <-- MODIFICADO
   lux_filtrado = filtradoExponencial(lux_filtrado, lux, 0.4);
 
-  // 4. Lógica de control de LED con histéresis (Aportada por el equipo)
+  // 4. Lógica de control de LED con histéresis
   if (!ledOn && ldr_raw < UMBRAL_ADC_ENCENDER) {
     digitalWrite(LED_PIN, HIGH);
     ledOn = true;
@@ -152,35 +163,60 @@ void leerSensores() {
   }
 }
 
+void registrarDatosEnSD() {
+  DateTime now = rtc.now();
+  char nombreArchivo[12];
+  snprintf(nombreArchivo, sizeof(nombreArchivo), "%02d%02d%02d.csv", now.day(), now.month(), now.year() % 100);
+  File dataFile = SD.open(nombreArchivo, FILE_WRITE);
+
+  if (dataFile) {
+    if (dataFile.size() == 0) {
+      dataFile.println("Fecha,Hora,Temperatura,Humedad,Presion,Lux");
+    }
+    char dataString[100];
+    snprintf(dataString, sizeof(dataString),
+             "%04d-%02d-%02d,%02d:%02d:%02d,%.1f,%.1f,%.1f,%.0f",
+             now.year(), now.month(), now.day(),
+             now.hour(), now.minute(), now.second(),
+             temperatura, humedad, presion, lux_filtrado);
+    dataFile.println(dataString);
+    dataFile.close();
+    Serial.print("Dato guardado en SD: ");
+    Serial.println(dataString);
+  } else {
+    Serial.print("Error abriendo ");
+    Serial.println(nombreArchivo);
+  }
+}
+
 void actualizarPantalla() {
   lcd.clear();
   lcd.setCursor(0, 0);
 
   switch (estado_lcd) {
-    case 0: { // Fecha y Hora
+    case 0: {
       DateTime now = rtc.now();
-      char buffer_fecha[11];
-      snprintf(buffer_fecha, sizeof(buffer_fecha), "%02d/%02d/%04d", now.day(), now.month(), now.year());
-      lcd.print(buffer_fecha);
+      char buffer[17];
+      snprintf(buffer, sizeof(buffer), "%02d/%02d/%04d", now.day(), now.month(), now.year());
+      lcd.print(buffer);
       lcd.setCursor(0, 1);
-      char buffer_hora[9];
-      snprintf(buffer_hora, sizeof(buffer_hora), "%02d:%02d:%02d", now.hour(), now.minute(), now.second());
-      lcd.print(buffer_hora);
+      snprintf(buffer, sizeof(buffer), "%02d:%02d:%02d", now.hour(), now.minute(), now.second());
+      lcd.print(buffer);
       break;
     }
-    case 1: { // Temperatura y Humedad
+    case 1: {
       lcd.print("Temp: " + String(temperatura, 1) + " C");
       lcd.setCursor(0, 1);
       lcd.print("Humedad: " + String(humedad, 1) + " %");
       break;
     }
-    case 2: { // Presión
+    case 2: {
       lcd.print("Presion:");
       lcd.setCursor(0, 1);
       lcd.print(String(presion, 1) + " hPa");
       break;
     }
-    case 3: { // Iluminancia
+    case 3: {
       lcd.print("Iluminancia:");
       lcd.setCursor(0, 1);
       lcd.print(String(lux_filtrado, 0) + " lux");
@@ -197,26 +233,23 @@ float filtradoExponencial(float valor_actual, float nueva_lectura, float alfa) {
   return (alfa * nueva_lectura) + (1 - alfa) * valor_actual;
 }
 
-// --- FUNCIÓN AÑADIDA PARA CÁLCULO PRECISO DE LUX ---
 /******************************************************************
- * Función mejorada para calcular Lux a partir de la lectura ADC
- * Se basa en el cálculo de la resistencia del LDR en un 
- * circuito divisor de voltaje.
+ * Función de cálculo de Lux por calibración de 2 puntos.
+ * Mapea un rango de lecturas ADC a un rango de Lux conocido.
  ******************************************************************/
-float calcularLuxPreciso(int valorADC) {
-  // Valor de la resistencia fija en Ohms (ajustado a 1kΩ).
-  const float RESISTENCIA_FIJA = 1000.0; 
+float calcularLuxCalibrado(int valorADC) {
+  // --- ¡AQUÍ VA TU CALIBRACIÓN! ---
+  // Reemplaza estos valores con los que mediste.
+  const int ADC_OSCURO = 90;    // Ejemplo: El valor que leíste con el dedo encima.
+  const int ADC_LUZ    = 680;   // Ejemplo: El valor que leíste con luz de habitación (300 lux).
 
-  // 1. Convertir la lectura (0-1023) a un voltaje (0.0-5.0)
-  float voltaje = valorADC * (5.0 / 1023.0);
+  // Mapeamos el rango de lecturas ADC a nuestro rango de Lux (10 a 300)
+  long lux = map(valorADC, ADC_OSCURO, ADC_LUZ, 10, 300);
+
+  // Nos aseguramos de que el valor no sea negativo
+  if (lux < 0) {
+    lux = 0;
+  }
   
-  // 2. Calcular la resistencia del LDR.
-  // Asume conexión "pull-down": 5V -> Resistencia Fija -> A0 -> LDR -> GND
-  float resistenciaLDR = (RESISTENCIA_FIJA * voltaje) / (5.0 - voltaje);
-
-  // 3. Convertir la resistencia del LDR a Lux.
-  // Fórmula de aproximación estándar para LDRs comunes.
-  float lux = pow(10, 6.7) * pow(resistenciaLDR, -0.7);
-
-  return lux;
+  return (float)lux;
 }
