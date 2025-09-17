@@ -19,7 +19,7 @@
 // --- CONFIGURACIÓN DE HARDWARE Y PINES ---
 // Sensor de Temperatura y Humedad
 #define DHT_PIN 9
-#define DHT_TYPE DHT22
+#define DHT_TYPE DHT11
 DHT dht(DHT_PIN, DHT_TYPE);
 
 // Sensor de Presión Barométrica
@@ -45,9 +45,9 @@ bool ledOn = false;
 // ---
 
 // --- VARIABLES GLOBALES PARA DATOS DE SENSORES ---
-float temperatura = NAN;
-float humedad = NAN;
-float presion = NAN;
+float temperatura = 0,0;
+float humedad = 0,0;
+float presion = 0,0;
 float lux = 0.0;
 float lux_filtrado = 0.0;
 
